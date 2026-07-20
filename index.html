@@ -2672,6 +2672,35 @@ main > section {
   color: var(--color-white-faint);
 }
 
+.payment-status {
+  margin-top: var(--space-4, 1rem);
+  padding: 0.75em 1em;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm, 0.9rem);
+  text-align: center;
+}
+.payment-status[data-state="loading"] {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--color-white-faint);
+}
+.payment-status[data-state="error"] {
+  background: rgba(255, 80, 80, 0.12);
+  color: #ff8a8a;
+  border: 1px solid rgba(255, 80, 80, 0.35);
+}
+
+.payment-success {
+  margin-top: var(--space-4, 1rem);
+  padding: var(--space-5, 1.25rem);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--glass-border);
+  background: rgba(255, 255, 255, 0.06);
+  text-align: center;
+}
+.payment-success .btn {
+  margin: 0.5em 0;
+}
+
 /* ---- Pricing Responsive ---- */
 @media (min-width: 640px) {
   .pricing__card {
@@ -3865,13 +3894,30 @@ main > section {
             </li>
           </ul>
 
-          <a href="#" class="btn btn-primary btn-xl pricing__cta">
+          <button
+            type="button"
+            id="payBtn"
+            class="btn btn-primary btn-xl pricing__cta"
+            data-amount="99"
+            data-product="AAYNEX Study Tracker"
+          >
             Buy Now — ₹99
-          </a>
+          </button>
 
           <p class="pricing__secure">
             🔒 Secure checkout · Instant access after payment
           </p>
+
+          <div id="payStatus" class="payment-status" role="status" aria-live="polite" style="display:none;"></div>
+
+          <div id="paySuccess" class="payment-success" style="display:none;">
+            <p><strong>🎉 Payment successful — thank you!</strong></p>
+            <p>Your product is ready. Click below to access it:</p>
+            <a id="paySuccessLink" href="https://drive.google.com/drive/folders/1axoy76eZfRcjh4nsDIM397CmctA_YDwL?usp=sharing" target="_blank" rel="noopener" class="btn btn-primary">
+              Open Your Download
+            </a>
+            <p style="font-size:0.85em;opacity:0.8;">A copy of this link isn't emailed automatically — save it now.</p>
+          </div>
         </div>
       </div>
     </section>
@@ -4530,6 +4576,175 @@ main > section {
 })();
 
   </script>
+
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+  <script>
+/* =========================================================
+   AAYNEX Payment Integration — Razorpay
+   Vanilla JS, no dependencies. Isolated from the main script
+   above so it can be edited/removed without touching layout JS.
+   ========================================================= */
+(function () {
+  'use strict';
+
+  const PAY_CONFIG = {
+    // Your Render backend base URL (no trailing slash)
+    backendUrl: 'https://aaynex-payment-backend.onrender.com',
+    // Razorpay KEY ID ONLY — never the key secret. Safe to expose publicly.
+    razorpayKeyId: 'rzp_live_TFeSiZCEKttruA',
+    currency: 'INR',
+    productName: 'AAYNEX Study Tracker',
+    companyName: 'AAYNEX',
+    themeColor: '#2f6bff'
+  };
+
+  function setStatus(el, text, state) {
+    if (!el) return;
+    el.style.display = text ? 'block' : 'none';
+    el.textContent = text;
+    if (state) {
+      el.setAttribute('data-state', state);
+    } else {
+      el.removeAttribute('data-state');
+    }
+  }
+
+  function initPayment() {
+    const payBtn = document.getElementById('payBtn');
+    if (!payBtn) return; // button not on this page
+
+    const statusEl = document.getElementById('payStatus');
+    const successEl = document.getElementById('paySuccess');
+
+    payBtn.addEventListener('click', async () => {
+      if (payBtn.disabled) return;
+
+      const amountRupees = Number(payBtn.getAttribute('data-amount')) || 0;
+      const productName = payBtn.getAttribute('data-product') || PAY_CONFIG.productName;
+
+      if (!amountRupees) {
+        setStatus(statusEl, 'Something is misconfigured — missing amount. Please contact support.', 'error');
+        return;
+      }
+
+      payBtn.disabled = true;
+      const originalLabel = payBtn.textContent;
+      payBtn.textContent = 'Processing…';
+      setStatus(statusEl, 'Setting up your secure payment…', 'loading');
+      if (successEl) successEl.style.display = 'none';
+
+      try {
+        // 1. Ask our backend to create a Razorpay order.
+        //    KEY_SECRET never touches the browser — this call is what
+        //    needs it, and it happens server-side on Render.
+        const orderRes = await fetch(PAY_CONFIG.backendUrl + '/create-order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            amount: amountRupees, // rupees; backend converts to paise
+            currency: PAY_CONFIG.currency,
+            product: productName
+          })
+        });
+
+        if (!orderRes.ok) {
+          throw new Error('order-create-failed');
+        }
+
+        const orderData = await orderRes.json();
+        if (!orderData || !orderData.id) {
+          throw new Error('order-create-invalid');
+        }
+
+        setStatus(statusEl, '', null);
+        payBtn.textContent = originalLabel;
+
+        // 2. Open Razorpay Checkout with the order_id from our backend.
+        const options = {
+          key: PAY_CONFIG.razorpayKeyId, // public Key ID only
+          amount: orderData.amount,
+          currency: orderData.currency || PAY_CONFIG.currency,
+          name: PAY_CONFIG.companyName,
+          description: productName,
+          order_id: orderData.id,
+          theme: { color: PAY_CONFIG.themeColor },
+          handler: function (response) {
+            verifyPayment(response, statusEl, successEl, payBtn, originalLabel);
+          },
+          modal: {
+            ondismiss: function () {
+              payBtn.disabled = false;
+              payBtn.textContent = originalLabel;
+              setStatus(statusEl, 'Payment cancelled. You can try again anytime.', 'error');
+            }
+          }
+        };
+
+        const rzp = new Razorpay(options);
+
+        rzp.on('payment.failed', function (response) {
+          payBtn.disabled = false;
+          payBtn.textContent = originalLabel;
+          setStatus(statusEl, 'Payment failed: ' + (response.error && response.error.description ? response.error.description : 'please try again.'), 'error');
+        });
+
+        rzp.open();
+      } catch (err) {
+        payBtn.disabled = false;
+        payBtn.textContent = originalLabel;
+        setStatus(statusEl, 'Could not start checkout. Please check your connection and try again.', 'error');
+      }
+    });
+
+    // 3. Verify payment server-side before unlocking access.
+    //    This recomputes the signature using KEY_SECRET on the backend.
+    //    NEVER grant access based on the client-side handler alone.
+    async function verifyPayment(response, statusEl, successEl, payBtn, originalLabel) {
+      setStatus(statusEl, 'Verifying your payment…', 'loading');
+      try {
+        const verifyRes = await fetch(PAY_CONFIG.backendUrl + '/verify-payment', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            razorpay_order_id: response.razorpay_order_id,
+            razorpay_payment_id: response.razorpay_payment_id,
+            razorpay_signature: response.razorpay_signature
+          })
+        });
+
+        const verifyData = await verifyRes.json().catch(() => ({}));
+
+        if (!verifyRes.ok || !verifyData.verified) {
+          throw new Error('verify-failed');
+        }
+
+        // Verified — unlock access.
+        setStatus(statusEl, '', null);
+        if (successEl) {
+          successEl.style.display = 'block';
+          successEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        payBtn.style.display = 'none';
+      } catch (err) {
+        setStatus(
+          statusEl,
+          'We received a payment but could not verify it automatically. Please contact support with your payment ID: ' + (response.razorpay_payment_id || 'unknown'),
+          'error'
+        );
+        payBtn.disabled = false;
+        payBtn.textContent = originalLabel;
+      }
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initPayment);
+  } else {
+    initPayment();
+  }
+})();
+  </script>
+
   <div class="lightbox" id="imageLightbox" role="dialog" aria-modal="true" aria-hidden="true">
     <div class="lightbox__inner">
       <button type="button" class="lightbox__close" id="lightboxClose" aria-label="Close image preview">&times;</button>
